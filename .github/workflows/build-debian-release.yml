@@ -1,0 +1,40 @@
+name: Build Debian-compatible CLI for existing release
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  linux-x64:
+    runs-on: ubuntu-24.04
+    steps:
+      # Same source commit as the published v0.5.4-trouze.2 macOS assets.
+      - uses: actions/checkout@v4
+        with:
+          ref: c9c79232ba83fb52d539018afecc040691ab2c45
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-gnu
+      - name: Install native build dependencies
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
+      - name: Test
+        run: cargo test --locked --workspace
+      - name: Build and smoke test
+        run: |
+          cargo build --locked --release --target x86_64-unknown-linux-gnu
+          ./target/x86_64-unknown-linux-gnu/release/vaultwarden-cli --version
+          file target/x86_64-unknown-linux-gnu/release/vaultwarden-cli
+      - name: Archive with license and checksum
+        run: |
+          mkdir -p dist
+          cp target/x86_64-unknown-linux-gnu/release/vaultwarden-cli LICENSE dist/
+          tar -czf vaultwarden-cli-x86_64-unknown-linux-gnu.tar.gz -C dist vaultwarden-cli LICENSE
+          sha256sum vaultwarden-cli-x86_64-unknown-linux-gnu.tar.gz > SHA256SUMS-linux.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vaultwarden-cli-x86_64-unknown-linux-gnu
+          path: |
+            vaultwarden-cli-x86_64-unknown-linux-gnu.tar.gz
+            SHA256SUMS-linux.txt
