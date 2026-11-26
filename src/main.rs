@@ -306,6 +306,17 @@ fn split_run_trailing(item: &[String], run_args: &[&str]) -> (Vec<String>, Vec<S
     (item, command)
 }
 
+/// CLI flags override environment credentials; neither is printed or stored in shell history.
+fn login_credentials(
+    client_id: Option<String>,
+    client_secret: Option<String>,
+) -> (Option<String>, Option<String>) {
+    (
+        client_id.or_else(|| std::env::var("VAULTWARDEN_CLIENT_ID").ok()),
+        client_secret.or_else(|| std::env::var("VAULTWARDEN_CLIENT_SECRET").ok()),
+    )
+}
+
 #[allow(clippy::too_many_lines)]
 async fn run_cli(cli: Cli, raw_args: &[&str]) -> Result<commands::CommandOutcome> {
     // Propagate global security flags to library code
@@ -318,9 +329,12 @@ async fn run_cli(cli: Cli, raw_args: &[&str]) -> Result<commands::CommandOutcome
             server,
             client_id,
             client_secret,
-        }) => commands::login(server, client_id, client_secret, &opts)
-            .await
-            .map(|_| commands::CommandOutcome::Success),
+        }) => {
+            let (client_id, client_secret) = login_credentials(client_id, client_secret);
+            commands::login(server, client_id, client_secret, &opts)
+                .await
+                .map(|_| commands::CommandOutcome::Success)
+        }
         Commands::Unlock(UnlockCommand { password }) => commands::unlock(password, &opts)
             .await
             .map(|_| commands::CommandOutcome::Success),
@@ -525,6 +539,29 @@ mod tests {
             token_expiry: Some(i64::MAX),
             crypto_keys: Some(CryptoKeys::from_key_bytes([0u8; 32], [0u8; 32])),
             ..Default::default()
+        }
+    }
+
+    #[test]
+    fn test_login_credentials_from_env_and_flag_precedence() {
+        let _env = TestEnv::new();
+        unsafe {
+            std::env::set_var("VAULTWARDEN_CLIENT_ID", "env-id");
+            std::env::set_var("VAULTWARDEN_CLIENT_SECRET", "env-secret");
+        }
+
+        assert_eq!(
+            login_credentials(None, None),
+            (Some("env-id".to_string()), Some("env-secret".to_string()))
+        );
+        assert_eq!(
+            login_credentials(Some("flag-id".to_string()), Some("flag-secret".to_string())),
+            (Some("flag-id".to_string()), Some("flag-secret".to_string()))
+        );
+
+        unsafe {
+            std::env::remove_var("VAULTWARDEN_CLIENT_ID");
+            std::env::remove_var("VAULTWARDEN_CLIENT_SECRET");
         }
     }
 

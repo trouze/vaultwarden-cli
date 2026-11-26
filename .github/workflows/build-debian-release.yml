@@ -1,40 +1,62 @@
-name: Build Debian-compatible CLI for existing release
+name: Build fork prerelease artifacts
 
 on:
   workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag to build (source and artifacts must match)
+        required: true
+        type: string
 
 permissions:
   contents: read
 
 jobs:
-  linux-x64:
-    runs-on: ubuntu-24.04
+  build:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+          - os: macos-latest
+            target: aarch64-apple-darwin
+          - os: macos-latest
+            target: x86_64-apple-darwin
     steps:
-      # Same source commit as the published v0.5.4-trouze.2 macOS assets.
       - uses: actions/checkout@v4
         with:
-          ref: c9c79232ba83fb52d539018afecc040691ab2c45
+          ref: ${{ inputs.tag }}
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: x86_64-unknown-linux-gnu
+          targets: ${{ matrix.target }}
       - name: Install native build dependencies
+        if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
       - name: Test
+        if: runner.os == 'Linux'
         run: cargo test --locked --workspace
       - name: Build and smoke test
         run: |
-          cargo build --locked --release --target x86_64-unknown-linux-gnu
-          ./target/x86_64-unknown-linux-gnu/release/vaultwarden-cli --version
-          file target/x86_64-unknown-linux-gnu/release/vaultwarden-cli
+          cargo build --locked --release --target ${{ matrix.target }}
+          file target/${{ matrix.target }}/release/vaultwarden-cli
+          if [ "${{ matrix.target }}" = "x86_64-unknown-linux-gnu" ]; then
+            ./target/${{ matrix.target }}/release/vaultwarden-cli --version
+          fi
       - name: Archive with license and checksum
         run: |
           mkdir -p dist
-          cp target/x86_64-unknown-linux-gnu/release/vaultwarden-cli LICENSE dist/
-          tar -czf vaultwarden-cli-x86_64-unknown-linux-gnu.tar.gz -C dist vaultwarden-cli LICENSE
-          sha256sum vaultwarden-cli-x86_64-unknown-linux-gnu.tar.gz > SHA256SUMS-linux.txt
+          cp target/${{ matrix.target }}/release/vaultwarden-cli LICENSE dist/
+          tar -czf vaultwarden-cli-${{ matrix.target }}.tar.gz -C dist vaultwarden-cli LICENSE
+          if [ "${{ matrix.target }}" = "x86_64-unknown-linux-gnu" ]; then
+            sha256sum vaultwarden-cli-${{ matrix.target }}.tar.gz > SHA256SUMS-linux.txt
+          else
+            shasum -a 256 vaultwarden-cli-${{ matrix.target }}.tar.gz > SHA256SUMS-${{ matrix.target }}.txt
+          fi
       - uses: actions/upload-artifact@v4
         with:
-          name: vaultwarden-cli-x86_64-unknown-linux-gnu
+          name: vaultwarden-cli-${{ matrix.target }}
           path: |
-            vaultwarden-cli-x86_64-unknown-linux-gnu.tar.gz
-            SHA256SUMS-linux.txt
+            vaultwarden-cli-${{ matrix.target }}.tar.gz
+            SHA256SUMS-*.txt

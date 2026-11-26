@@ -124,10 +124,13 @@ vaultwarden-cli login \
   --client-id "user.xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" \
   --client-secret "your-client-secret"
 
-# Or use environment variables for client credentials
-export VAULTWARDEN_CLIENT_ID="user.xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
-export VAULTWARDEN_CLIENT_SECRET="your-client-secret"
+# Or use environment variables so the secret does not appear in argv or shell history.
+# In an interactive Bash shell, read the secret without echoing it:
+read -r -p 'Client ID: ' VAULTWARDEN_CLIENT_ID
+read -r -s -p 'Client secret: ' VAULTWARDEN_CLIENT_SECRET; echo
+export VAULTWARDEN_CLIENT_ID VAULTWARDEN_CLIENT_SECRET
 vaultwarden-cli login --server https://your-vaultwarden-server.com
+unset VAULTWARDEN_CLIENT_ID VAULTWARDEN_CLIENT_SECRET
 
 # Unlock the vault with your master password
 vaultwarden-cli unlock
