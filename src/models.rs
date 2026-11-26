@@ -510,6 +510,8 @@ pub struct Cipher {
     pub id: CipherId,
     pub organization_id: Option<OrgId>,
     pub deleted_date: Option<String>,
+    /// Encrypted per-item symmetric key (Bitwarden cipher key).
+    pub key: Option<String>,
     pub name: Option<String>,
     pub notes: Option<String>,
     pub folder_id: Option<FolderId>,
@@ -536,6 +538,8 @@ impl<'de> Deserialize<'de> for Cipher {
             organization_id: Option<OrgId>,
             #[serde(alias = "DeletedDate", alias = "deletedDate")]
             deleted_date: Option<String>,
+            #[serde(alias = "Key", alias = "key")]
+            key: Option<String>,
             #[serde(alias = "Name", alias = "name")]
             name: Option<String>,
             #[serde(alias = "Notes", alias = "notes")]
@@ -600,6 +604,7 @@ impl<'de> Deserialize<'de> for Cipher {
             id: h.id,
             organization_id: h.organization_id,
             deleted_date: h.deleted_date,
+            key: h.key,
             name: h.name,
             notes: h.notes,
             folder_id: h.folder_id,
@@ -930,6 +935,7 @@ mod tests {
                 id: CipherId::new("test-id".to_string()).unwrap(),
                 organization_id: None,
                 deleted_date: None,
+                key: None,
                 name: Some("encrypted-name".to_string()),
                 notes: Some("encrypted-notes".to_string()),
                 folder_id: None,
@@ -957,6 +963,7 @@ mod tests {
                 id: CipherId::new("test-id".to_string()).unwrap(),
                 organization_id: None,
                 deleted_date: None,
+                key: None,
                 name: None,
                 notes: None,
                 folder_id: None,
@@ -1022,6 +1029,7 @@ mod tests {
                 id: CipherId::new("test".to_string()).unwrap(),
                 organization_id: None,
                 deleted_date: None,
+                key: None,
                 name: None,
                 notes: None,
                 folder_id: None,
@@ -1080,6 +1088,7 @@ mod tests {
                 id: CipherId::new("test".to_string()).unwrap(),
                 organization_id: None,
                 deleted_date: None,
+                key: None,
                 name: None,
                 notes: None,
                 folder_id: None,

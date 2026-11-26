@@ -7,7 +7,7 @@ use support::{
     env_lock, test_crypto_keys,
 };
 use vaultwarden_cli::config::Config;
-use vaultwarden_cli::crypto::KdfIterations;
+use vaultwarden_cli::crypto::{CryptoKeys, KdfIterations};
 use wiremock::matchers::{header, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -436,6 +436,11 @@ async fn run_with_implicit_name_injects_matching_item() {
                     "Username": encrypt_string_for_test("alice", &keys),
                     "Password": encrypt_string_for_test("alpha-secret", &keys)
                 },
+                "Fields": [{
+                    "Name": encrypt_string_for_test("PLAID_ENV", &keys),
+                    "Value": encrypt_string_for_test("production", &keys),
+                    "Type": 1
+                }],
                 "CollectionIds": []
             }
         ],
@@ -473,13 +478,16 @@ async fn run_with_implicit_name_injects_matching_item() {
         .assert()
         .success()
         .stdout(predicate::str::contains("ALPHA_USERNAME"))
-        .stdout(predicate::str::contains("ALPHA_PASSWORD"));
+        .stdout(predicate::str::contains("ALPHA_PASSWORD"))
+        .stdout(predicate::str::contains("ALPHA_PLAID_ENV"));
 }
 
 #[tokio::test]
 async fn run_injects_env_vars_into_child_process() {
     let ctx = TestContext::new();
     let keys = test_crypto_keys();
+    let item_keys = CryptoKeys::from_key_bytes([0x44; 32], [0x45; 32]);
+    let item_key_material = format!("{}{}", "D".repeat(32), "E".repeat(32));
     let mock_server = MockServer::start().await;
 
     let sync_response = serde_json::json!({
@@ -487,11 +495,17 @@ async fn run_injects_env_vars_into_child_process() {
             {
                 "Id": "cipher-1",
                 "Type": 1,
-                "Name": encrypt_string_for_test("Alpha", &keys),
+                "Key": encrypt_string_for_test(&item_key_material, &keys),
+                "Name": encrypt_string_for_test("Alpha", &item_keys),
                 "Login": {
-                    "Username": encrypt_string_for_test("alice", &keys),
-                    "Password": encrypt_string_for_test("alpha-secret", &keys)
+                    "Username": encrypt_string_for_test("alice", &item_keys),
+                    "Password": encrypt_string_for_test("alpha-secret", &item_keys)
                 },
+                "Fields": [{
+                    "Name": encrypt_string_for_test("PLAID_ENV", &item_keys),
+                    "Value": encrypt_string_for_test("production", &item_keys),
+                    "Type": 1
+                }],
                 "CollectionIds": []
             }
         ],
@@ -528,11 +542,14 @@ async fn run_injects_env_vars_into_child_process() {
         .arg("--")
         .arg("sh")
         .arg("-c")
-        .arg("printf '%s\\n%s\\n' \"$ALPHA_USERNAME\" \"$ALPHA_PASSWORD\"")
+        .arg(
+            "printf '%s\\n%s\\n%s\\n' \"$ALPHA_USERNAME\" \"$ALPHA_PASSWORD\" \"$ALPHA_PLAID_ENV\"",
+        )
         .assert()
         .success()
         .stdout(predicate::str::contains("alice"))
-        .stdout(predicate::str::contains("alpha-secret"));
+        .stdout(predicate::str::contains("alpha-secret"))
+        .stdout(predicate::str::contains("production"));
 }
 
 #[tokio::test]

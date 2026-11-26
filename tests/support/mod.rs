@@ -66,11 +66,10 @@ impl TestContext {
     pub fn config_dir(&self) -> PathBuf {
         #[cfg(target_os = "macos")]
         {
-            return self
-                .home_dir()
+            self.home_dir()
                 .join("Library")
                 .join("Application Support")
-                .join("com.vaultwarden.vaultwarden-cli");
+                .join("com.vaultwarden.vaultwarden-cli")
         }
 
         #[cfg(not(target_os = "macos"))]
@@ -403,6 +402,7 @@ pub fn login_cipher(id: &str, name: &str, username: &str, password: &str, uri: &
         id: CipherId::new(id.to_string()).unwrap(),
         organization_id: None,
         deleted_date: None,
+        key: None,
         name: Some(name.to_string()),
         notes: None,
         folder_id: None,
@@ -432,6 +432,7 @@ pub fn nested_login_cipher(
         id: CipherId::new(id.to_string()).unwrap(),
         organization_id: None,
         deleted_date: None,
+        key: None,
         name: None,
         notes: None,
         folder_id: None,

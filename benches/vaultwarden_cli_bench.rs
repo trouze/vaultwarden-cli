@@ -151,6 +151,7 @@ fn fixture_ciphers(count: usize) -> Vec<Cipher> {
             id: CipherId::new(format!("cipher-{i:04}")).unwrap(),
             organization_id: Some(OrgId::new(format!("org-{}", i % 4)).unwrap()),
             deleted_date: None,
+            key: None,
             name: Some(format!("service-{i:04}")),
             notes: Some(format!("deterministic note {i}")),
             folder_id: Some(FolderId::new(format!("folder-{}", i % 8)).unwrap()),
@@ -182,7 +183,7 @@ fn fixture_outputs(ciphers: &[Cipher]) -> Vec<CipherOutput> {
             cipher_type: "login".to_string(),
             name: cipher.get_name().unwrap_or_default().to_string(),
             username: cipher.get_username().map(str::to_string),
-            password: cipher.get_password().map(str::to_string),
+            password: cipher.get_password().map(str::to_string), // secrets-ignore: deterministic benchmark fixture
             uri: cipher.get_uri().map(str::to_string),
             notes: cipher.get_notes().map(str::to_string),
             fields: cipher.get_fields().map(|fields| {

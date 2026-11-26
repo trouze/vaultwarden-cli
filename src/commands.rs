@@ -936,8 +936,8 @@ impl CipherDecryptionProfile {
             password: true,
             uri: true,
             notes: false,
-            field_names: false,
-            field_values: false,
+            field_names: true,
+            field_values: true,
             ssh_public_key: true,
             ssh_private_key: true,
             ssh_fingerprint: true,
@@ -959,6 +959,14 @@ impl CipherDecryptionProfile {
             ssh_fingerprint: true,
             decrypt_present_standard_values: false,
             _private: (),
+        }
+    }
+
+    const fn run_profile(info_only: bool) -> Self {
+        if info_only {
+            Self::list_env_names()
+        } else {
+            Self::run_env()
         }
     }
 
@@ -986,6 +994,8 @@ impl CipherDecryptionProfile {
 fn decrypt_optional_cipher_value(
     keys: &CryptoKeys,
     encrypted: Option<&str>,
+    cipher_id: &str,
+    field_name: &str,
     should_include: bool,
     should_decrypt: bool,
 ) -> Result<Option<String>> {
@@ -994,6 +1004,7 @@ fn decrypt_optional_cipher_value(
     }
     if should_decrypt {
         try_decrypt(keys, encrypted)
+            .with_context(|| format!("failed to decrypt {field_name} for cipher {cipher_id}"))
     } else {
         Ok(encrypted.map(|_| String::new()))
     }
@@ -1023,30 +1034,57 @@ fn decrypt_cipher_with_profile(
     keys: &CryptoKeys,
     profile: CipherDecryptionProfile,
 ) -> Result<CipherOutput> {
+    let item_keys = match cipher.key.as_deref() {
+        Some(encrypted_key) => {
+            let key_bytes =
+                zeroize::Zeroizing::new(keys.decrypt(encrypted_key).with_context(|| {
+                    format!("failed to decrypt item key for cipher {}", cipher.id)
+                })?);
+            CryptoKeys::from_symmetric_key(key_bytes.as_slice())
+                .with_context(|| format!("invalid decrypted item key for cipher {}", cipher.id))?
+        }
+        None => keys.clone(),
+    };
+    let keys = &item_keys;
+
     let name = cipher.get_name().context("Cipher has no name")?;
-    let decrypted_name = keys.decrypt_to_string(name)?;
+    let decrypted_name = keys.decrypt_to_string(name).with_context(|| {
+        format!(
+            "failed to decrypt name for cipher {} (organization {})",
+            cipher.id,
+            cipher.organization_id.as_deref().unwrap_or("personal")
+        )
+    })?;
 
     let decrypted_username = decrypt_optional_cipher_value(
         keys,
         cipher.get_username(),
+        &cipher.id,
+        "username",
         profile.username,
         profile.decrypt_present_standard_values,
     )?;
     let decrypted_password = decrypt_optional_cipher_value(
         keys,
         cipher.get_password(),
+        &cipher.id,
+        "password",
         profile.password,
         profile.decrypt_present_standard_values,
     )?;
     let decrypted_uri = decrypt_optional_cipher_value(
         keys,
         cipher.get_uri(),
+        &cipher.id,
+        "URI",
         profile.uri,
         profile.decrypt_present_standard_values,
     )?;
     let decrypted_notes = decrypt_optional_cipher_value(
         keys,
         cipher.get_notes(),
+        &cipher.id,
+        "notes",
         profile.notes,
         profile.decrypt_present_standard_values,
     )?;
@@ -2145,8 +2183,12 @@ pub async fn run_with_secrets(options: RunOptions<'_>) -> Result<CommandOutcome>
         let mut outputs = Vec::with_capacity(requested_items.len());
         let mut all_items_found_by_id = true;
         for item in requested_items {
-            if let Ok(output) =
-                fetch_cipher_output_by_id(&api_ctx, item, CipherDecryptionProfile::run_env()).await
+            if let Ok(output) = fetch_cipher_output_by_id(
+                &api_ctx,
+                item,
+                CipherDecryptionProfile::run_profile(info_only),
+            )
+            .await
             {
                 outputs.push(output);
             } else {
@@ -2212,7 +2254,7 @@ pub async fn run_with_secrets(options: RunOptions<'_>) -> Result<CommandOutcome>
             &ctx.config,
             name_or_id,
             matches_filters,
-            CipherDecryptionProfile::run_env(),
+            CipherDecryptionProfile::run_profile(info_only),
         )
     };
 
@@ -2225,7 +2267,7 @@ pub async fn run_with_secrets(options: RunOptions<'_>) -> Result<CommandOutcome>
             &ctx.config,
             uri,
             matches_filters,
-            CipherDecryptionProfile::run_env(),
+            CipherDecryptionProfile::run_profile(info_only),
         )?]
     } else if !requested_items.is_empty() {
         requested_items
@@ -2241,7 +2283,7 @@ pub async fn run_with_secrets(options: RunOptions<'_>) -> Result<CommandOutcome>
                 type_filter: None,
                 folder_id: None,
             },
-            CipherDecryptionProfile::run_env(),
+            CipherDecryptionProfile::run_profile(info_only),
         )
         .await?;
         if outputs.is_empty() {
@@ -2259,7 +2301,11 @@ pub async fn run_with_secrets(options: RunOptions<'_>) -> Result<CommandOutcome>
         {
             let output = get_cipher_keys(&ctx.config, cipher)
                 .and_then(|keys| {
-                    decrypt_cipher_with_profile(cipher, keys, CipherDecryptionProfile::run_env())
+                    decrypt_cipher_with_profile(
+                        cipher,
+                        keys,
+                        CipherDecryptionProfile::run_profile(info_only),
+                    )
                 })
                 .with_context(|| {
                     format!(
@@ -2803,6 +2849,7 @@ mod tests {
                 id: CipherId::new("cipher-1".to_string()).unwrap(),
                 organization_id: Some(OrgId::new("org-1".to_string()).unwrap()),
                 deleted_date: None,
+                key: None,
                 name: None,
                 notes: None,
                 folder_id: None,
@@ -2826,6 +2873,7 @@ mod tests {
                 id: CipherId::new("cipher-1".to_string()).unwrap(),
                 organization_id: Some(OrgId::new("org-1".to_string()).unwrap()),
                 deleted_date: None,
+                key: None,
                 name: None,
                 notes: None,
                 folder_id: None,
@@ -2869,6 +2917,7 @@ mod tests {
                 id: CipherId::new("cipher-1".to_string()).unwrap(),
                 organization_id: None,
                 deleted_date: None,
+                key: None,
                 name: None,
                 notes: None,
                 folder_id: Some(FolderId::new("folder-1".to_string()).unwrap()),
@@ -2995,6 +3044,7 @@ mod tests {
                 id: CipherId::new(id.to_string()).unwrap(),
                 organization_id: None,
                 deleted_date: None,
+                key: None,
                 name: None,
                 notes: None,
                 folder_id: None,
@@ -3121,6 +3171,87 @@ mod tests {
             assert_eq!(output.username.as_deref(), Some("alice"));
             assert_eq!(output.password.as_deref(), Some("secret"));
             assert_eq!(output.uri.as_deref(), Some("https://first.example.com"));
+        }
+
+        #[test]
+        fn test_run_env_profile_decrypts_custom_fields() {
+            let keys = test_crypto_keys();
+            let mut cipher = create_named_test_cipher("test-123", CipherType::SecureNote, &keys);
+            cipher.fields = Some(vec![FieldData {
+                name: Some(encrypt_for_decrypt_cipher_test("PLAID_ENV", &keys)),
+                value: Some(encrypt_for_decrypt_cipher_test("production", &keys)),
+                r#type: FieldType::Hidden,
+            }]);
+
+            let output =
+                decrypt_cipher_with_profile(&cipher, &keys, CipherDecryptionProfile::run_env())
+                    .expect("run env profile should decrypt custom fields");
+
+            let fields = output.fields.expect("custom fields should be present");
+            assert_eq!(fields.len(), 1);
+            assert_eq!(fields[0].name, "PLAID_ENV");
+            assert_eq!(fields[0].value, "production");
+            assert!(fields[0].hidden);
+        }
+
+        #[test]
+        fn test_decrypt_cipher_uses_per_item_key() {
+            let parent_keys = test_crypto_keys();
+            let item_keys = CryptoKeys::from_key_bytes([0x44; 32], [0x45; 32]);
+            let mut item_key_bytes = Vec::with_capacity(64);
+            item_key_bytes.extend_from_slice(item_keys.enc_key_bytes());
+            item_key_bytes.extend_from_slice(item_keys.mac_key_bytes());
+
+            let mut cipher =
+                create_named_test_cipher("item-key-cipher", CipherType::SecureNote, &parent_keys);
+            cipher.key = Some(
+                crate::crypto::crypto_keys::tests::test_helpers::encrypt_bytes_for_test(
+                    &item_key_bytes,
+                    parent_keys.enc_key_bytes(),
+                    parent_keys.mac_key_bytes(),
+                ),
+            );
+            cipher.name = Some(encrypt_for_decrypt_cipher_test("Per Item Key", &item_keys));
+            cipher.fields = Some(vec![FieldData {
+                name: Some(encrypt_for_decrypt_cipher_test("PLAID_ENV", &item_keys)),
+                value: Some(encrypt_for_decrypt_cipher_test("production", &item_keys)),
+                r#type: FieldType::Hidden,
+            }]);
+
+            let output = decrypt_cipher_with_profile(
+                &cipher,
+                &parent_keys,
+                CipherDecryptionProfile::run_profile(false),
+            )
+            .expect("cipher should decrypt with its per-item key");
+
+            assert_eq!(output.name, "Per Item Key");
+            let fields = output.fields.expect("custom fields should be present");
+            assert_eq!(fields[0].name, "PLAID_ENV");
+            assert_eq!(fields[0].value, "production");
+        }
+
+        #[test]
+        fn test_run_info_profile_does_not_decrypt_custom_field_values() {
+            let keys = test_crypto_keys();
+            let mut cipher = create_named_test_cipher("test-123", CipherType::SecureNote, &keys);
+            cipher.fields = Some(vec![FieldData {
+                name: Some(encrypt_for_decrypt_cipher_test("PLAID_ENV", &keys)),
+                value: Some("not-encrypted".to_string()),
+                r#type: FieldType::Hidden,
+            }]);
+
+            let output = decrypt_cipher_with_profile(
+                &cipher,
+                &keys,
+                CipherDecryptionProfile::run_profile(true),
+            )
+            .expect("run info profile should not decrypt custom field values");
+
+            let fields = output.fields.expect("custom field names should be present");
+            assert_eq!(fields.len(), 1);
+            assert_eq!(fields[0].name, "PLAID_ENV");
+            assert_eq!(fields[0].value, "");
         }
 
         #[test]
@@ -4248,6 +4379,7 @@ mod tests {
                 id: CipherId::new("cipher-1".to_string()).unwrap(),
                 organization_id: None,
                 deleted_date: None,
+                key: None,
                 name: Some(encrypted_name),
                 notes: None,
                 folder_id: None,
@@ -4288,6 +4420,7 @@ mod tests {
                 id: CipherId::new("cipher-1".to_string()).unwrap(),
                 organization_id: None,
                 deleted_date: None,
+                key: None,
                 name: Some(encrypted_name),
                 notes: None,
                 folder_id: None,
@@ -6499,6 +6632,7 @@ mod tests {
                 id: CipherId::new("test".to_string()).unwrap(),
                 organization_id: org_id.map(|s| OrgId::new(s.to_string()).unwrap()),
                 deleted_date: None,
+                key: None,
                 name: None,
                 notes: None,
                 folder_id: None,
@@ -7236,6 +7370,7 @@ mod tests {
                 id: CipherId::new(id.to_string()).unwrap(),
                 organization_id: None,
                 deleted_date: None,
+                key: None,
                 name: None,
                 notes: None,
                 folder_id: None,
@@ -7290,6 +7425,7 @@ mod tests {
                 name: Some(encrypted_name),
                 organization_id: None,
                 deleted_date: None,
+                key: None,
                 notes: None,
                 folder_id: None,
                 collection_ids: Vec::new(),
@@ -7352,6 +7488,7 @@ mod tests {
                 id: CipherId::new("cipher-1".to_string()).unwrap(),
                 organization_id: None,
                 deleted_date: None,
+                key: None,
                 name: None,
                 notes: None,
                 folder_id: None,
@@ -7388,6 +7525,7 @@ mod tests {
                 id: CipherId::new("cipher-1".to_string()).unwrap(),
                 organization_id: None,
                 deleted_date: None,
+                key: None,
                 name: None,
                 notes: None,
                 folder_id: None,
@@ -7471,6 +7609,7 @@ mod tests {
                 id: CipherId::new(id.to_string()).unwrap(),
                 organization_id: None,
                 deleted_date: None,
+                key: None,
                 name: Some(encrypted_uri(keys, "Real Host")),
                 notes: None,
                 folder_id: None,
