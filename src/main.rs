@@ -1,4 +1,6 @@
 use argy::{FromArgValue, FromArgs};
+use anyhow::Context as _;
+use std::io::IsTerminal as _;
 use vaultwarden_cli::commands::{self, OutputFormat};
 
 type Result<T> = std::result::Result<T, anyhow::Error>;
@@ -39,6 +41,43 @@ enum Commands {
     RunUri(RunUriCommand),
     Status(StatusCommand),
     Interpolate(InterpolateCommand),
+    Create(CreateCommand),
+    Delete(DeleteCommand),
+}
+
+#[derive(FromArgs)]
+#[argy(subcommand, name = "create")]
+/// create an item (SecureNote with fields) in the vault
+struct CreateCommand {
+    /// item path as folder/name (bare name = vault root)
+    #[argy(positional)]
+    item: String,
+
+    /// custom text field NAME=VALUE (not for secrets — argv is visible)
+    #[argy(option, long = "field")]
+    field: Vec<String>,
+
+    /// hidden (secret) field NAME; its value is read silently from the
+    /// prompt, or one line from stdin when piped
+    #[argy(option, long = "secret")]
+    secret: Vec<String>,
+
+    /// note text stored on the item (plaintext, not encrypted until stored)
+    #[argy(option)]
+    note: Option<String>,
+}
+
+#[derive(FromArgs)]
+#[argy(subcommand, name = "delete")]
+/// delete an item from the vault (requires --yes)
+struct DeleteCommand {
+    /// item path as folder/name, or a raw item id
+    #[argy(positional)]
+    item: String,
+
+    /// confirm the deletion
+    #[argy(switch)]
+    yes: bool,
 }
 
 #[derive(FromArgs)]
@@ -459,7 +498,61 @@ async fn run_cli(cli: Cli, raw_args: &[&str]) -> Result<commands::CommandOutcome
         }) => commands::interpolate(&file, output.as_deref(), skip_missing, &opts)
             .await
             .map(|()| commands::CommandOutcome::Success),
+        Commands::Create(CreateCommand {
+            item,
+            field,
+            secret,
+            note,
+        }) => {
+            let mut fields: Vec<commands::CreateFieldSpec> = Vec::new();
+            for spec in &field {
+                let (name, value) = spec
+                    .split_once('=')
+                    .with_context(|| format!("--field expects NAME=VALUE, got '{spec}'"))?;
+                fields.push(commands::CreateFieldSpec {
+                    name: name.to_string(),
+                    value: value.to_string(),
+                    hidden: false,
+                });
+            }
+            for name in &secret {
+                if name.is_empty() || name.contains('=') {
+                    anyhow::bail!("--secret expects a bare field NAME, got '{name}'");
+                }
+                let value = read_secret_value(name)?;
+                fields.push(commands::CreateFieldSpec {
+                    name: name.to_string(),
+                    value,
+                    hidden: true,
+                });
+            }
+            commands::create(&item, fields, note.clone(), &opts)
+                .await
+                .map(|()| commands::CommandOutcome::Success)
+        }
+        Commands::Delete(DeleteCommand { item, yes }) => commands::delete_item(&item, yes, &opts)
+            .await
+            .map(|()| commands::CommandOutcome::Success),
     }
+}
+
+/// Read one secret value from the terminal prompt, or from stdin when it is
+/// piped (the agent-friendly path). The value never appears in argv.
+fn read_secret_value(name: &str) -> Result<String> {
+    let value = if std::io::stdin().is_terminal() {
+        rpassword::prompt_password(format!("value for field '{name}': "))
+            .context("reading secret field value")?
+    } else {
+        let mut line = String::new();
+        std::io::stdin()
+            .read_line(&mut line)
+            .context("reading secret field value from stdin")?;
+        line.trim_end_matches(['\r', '\n']).to_string()
+    };
+    if value.is_empty() {
+        anyhow::bail!("refusing to store an empty value for secret field '{name}'");
+    }
+    Ok(value)
 }
 
 #[cfg(test)]

@@ -2490,6 +2490,7 @@ dependencies = [
  "dbus-secret-service-keyring-store",
  "directories",
  "fs4",
+ "getrandom 0.4.3",
  "hkdf 0.13.0",
  "hmac 0.13.0",
  "keyring-core",

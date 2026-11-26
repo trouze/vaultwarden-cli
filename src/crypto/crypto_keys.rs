@@ -8,7 +8,7 @@
 //!
 //! Once obtained, callers can decrypt data or decrypt their RSA private key.
 
-use aes::cipher::{BlockModeDecrypt, KeyIvInit, block_padding::Pkcs7};
+use aes::cipher::{BlockModeDecrypt, BlockModeEncrypt, KeyIvInit, block_padding::Pkcs7};
 use anyhow::{Context, Result};
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use hmac::{Hmac, KeyInit, Mac};
@@ -110,6 +110,56 @@ impl CryptoKeys {
     pub fn decrypt_to_string(&self, encrypted: &str) -> Result<String> {
         let decrypted = self.decrypt(encrypted)?;
         String::from_utf8(decrypted).context("Decrypted data is not valid UTF-8")
+    }
+
+    /// Encrypt bytes with AES-256-CBC + HMAC-SHA256, producing the
+    /// `2.<iv>|<ciphertext>|<mac>` Bitwarden encrypted-string format that
+    /// every Bitwarden client (and this CLI's own decrypt path) understands.
+    ///
+    /// A fresh random IV is used for every call, so encrypting the same
+    /// plaintext twice yields different ciphertexts.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the OS randomness source fails, the keys are not
+    /// usable for AES-256-CBC, or encryption fails.
+    pub fn encrypt(&self, plaintext: &[u8]) -> Result<String> {
+        let mut iv = [0u8; 16];
+        getrandom::fill(&mut iv).context("reading OS randomness for the IV")?;
+        let mut buffer = plaintext.to_vec();
+        let message_len = buffer.len();
+        buffer.resize(message_len + 16, 0);
+
+        let ciphertext = cbc::Encryptor::<aes::Aes256>::new_from_slices(
+            self.enc_key.as_slice(),
+            &iv,
+        )
+        .context("building AES-256-CBC encryptor")?
+        .encrypt_padded::<Pkcs7>(&mut buffer, message_len)
+        .context("encrypting with AES-256-CBC")?
+        .to_vec();
+
+        let mut hmac = Hmac::<Sha256>::new_from_slice(self.mac_key.as_slice())
+            .context("initializing HMAC-SHA256")?;
+        hmac.update(&iv);
+        hmac.update(&ciphertext);
+        let mac = hmac.finalize().into_bytes();
+
+        Ok(format!(
+            "2.{}|{}|{}",
+            BASE64.encode(iv),
+            BASE64.encode(&ciphertext),
+            BASE64.encode(mac)
+        ))
+    }
+
+    /// Encrypt a UTF-8 string to the `2.<iv>|<ciphertext>|<mac>` format.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if encryption fails (see [`CryptoKeys::encrypt`]).
+    pub fn encrypt_to_string(&self, plaintext: &str) -> Result<String> {
+        self.encrypt(plaintext.as_bytes())
     }
 
     // ── Public accessors for serialization / config ──────────────────────
@@ -719,6 +769,58 @@ pub mod tests {
             let org_keys = CryptoKeys::decrypt_org_key(&encrypted_str, &private_key).unwrap();
             assert_eq!(org_keys.enc_key(), &org_plaintext[0..32]);
             assert_eq!(org_keys.mac_key(), &org_plaintext[32..64]);
+        }
+    }
+}
+
+#[cfg(test)]
+mod encrypt_roundtrip_tests {
+    use super::CryptoKeys;
+    use base64::Engine;
+
+    #[test]
+    fn encrypt_round_trips_through_decrypt() {
+        let keys = CryptoKeys::from_key_bytes([7u8; 32], [9u8; 32]);
+        for message in ["", "a", "hello, vaultwarden", "multi\nline\nvalue", "mütc"] {
+            let sealed = keys.encrypt(message.as_bytes()).expect("encrypt");
+            assert!(sealed.starts_with("2."), "expected Bitwarden type-2 string");
+            assert_eq!(
+                keys.decrypt_to_string(&sealed).expect("decrypt"),
+                message,
+                "round trip must preserve the plaintext"
+            );
+        }
+    }
+
+    #[test]
+    fn encrypt_uses_a_fresh_iv_each_call() {
+        let keys = CryptoKeys::from_key_bytes([1u8; 32], [2u8; 32]);
+        let a = keys.encrypt(b"same plaintext").expect("encrypt");
+        let b = keys.encrypt(b"same plaintext").expect("encrypt");
+        assert_ne!(a, b, "ciphertexts must differ: random IV per call");
+        assert_eq!(
+            keys.decrypt_to_string(&a).unwrap(),
+            keys.decrypt_to_string(&b).unwrap()
+        );
+    }
+
+    #[test]
+    fn encrypt_output_matches_the_bitwarden_string_layout() {
+        let keys = CryptoKeys::from_key_bytes([3u8; 32], [4u8; 32]);
+        let sealed = keys.encrypt(b"payload").expect("encrypt");
+        let mut parts = sealed.splitn(3, '.');
+        assert_eq!(parts.next(), Some("2"));
+        let remainder = parts.next().expect("iv|ct|mac body");
+        assert_eq!(parts.next(), None, "no second dot expected");
+        let segments: Vec<&str> = remainder.split('|').collect();
+        assert_eq!(segments.len(), 3, "expected iv|ciphertext|mac");
+        for segment in &segments {
+            assert!(
+                base64::engine::general_purpose::STANDARD
+                    .decode(segment)
+                    .is_ok(),
+                "each segment must be base64"
+            );
         }
     }
 }

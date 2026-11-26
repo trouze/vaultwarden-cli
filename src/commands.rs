@@ -36,8 +36,8 @@ use crate::config::{
 use crate::crypto::{CryptoKeys, KdfIterations, MasterKey};
 #[allow(unused_imports)]
 use crate::models::{
-    Cipher, CipherData, CipherId, CipherOutput, CipherType, CollectionId, FieldOutput, FolderId,
-    LoginData, OrgId, UserId,
+    Cipher, CipherData, CipherId, CipherOutput, CipherType, CollectionId, FieldOutput, Folder,
+    FolderId, LoginData, OrgId, UserId,
 };
 
 struct TokenRefreshLock {
@@ -2451,6 +2451,272 @@ fn logout_loaded_config(mut config: Config) -> Result<()> {
 
     config.clear()?;
     println!("Logged out successfully.");
+    Ok(())
+}
+
+/// One custom field requested by the caller of [`create`].
+#[derive(Debug, Clone)]
+pub struct CreateFieldSpec {
+    /// Field name (stored encrypted, displayed by `vaultkeys`).
+    pub name: String,
+    /// Field value (stored encrypted).
+    pub value: String,
+    /// `true` marks the field hidden/secret (Bitwarden field type 1).
+    pub hidden: bool,
+}
+
+/// Split an item path into its optional folder part and the item name.
+/// Mirrors the addressing used by `get`/`run`: `folder/name` or bare `name`.
+fn split_item_path(item: &str) -> Result<(&str, Option<&str>)> {
+    match item.rsplit_once('/') {
+        Some((folder, name)) => {
+            if folder.is_empty() || name.is_empty() {
+                anyhow::bail!("item path must look like folder/name or name, got '{item}'");
+            }
+            Ok((name, Some(folder)))
+        }
+        None => Ok((item, None)),
+    }
+}
+
+/// Resolve a folder by its decrypted (case-insensitive) name.
+fn resolve_folder_id<'a>(
+    folders: &'a [Folder],
+    user_keys: &CryptoKeys,
+    folder: &str,
+) -> Result<&'a Folder> {
+    let matched = folders.iter().find(|f| {
+        user_keys
+            .decrypt_to_string(&f.name)
+            .is_ok_and(|n| n.eq_ignore_ascii_case(folder))
+    });
+    if let Some(matched) = matched {
+        return Ok(matched);
+    }
+    let available: Vec<String> = folders
+        .iter()
+        .filter_map(|f| user_keys.decrypt_to_string(&f.name).ok())
+        .collect();
+    anyhow::bail!(
+        "Folder '{folder}' not found (available: {})",
+        if available.is_empty() {
+            "(none)".to_string()
+        } else {
+            available.join(", ")
+        }
+    )
+}
+
+/// Decrypt a cipher's name using the per-item key when present, falling back
+/// to the user keys. Read-only helper shared by duplicate checks.
+fn decrypt_cipher_name(cipher: &Cipher, user_keys: &CryptoKeys) -> Option<String> {
+    let Some(encrypted_name) = cipher.get_name() else {
+        return None;
+    };
+    let keys = match cipher.key.as_deref() {
+        Some(encrypted_key) => {
+            let bytes = user_keys.decrypt(encrypted_key).ok()?;
+            CryptoKeys::from_symmetric_key(&bytes).ok()?
+        }
+        None => user_keys.clone(),
+    };
+    keys.decrypt_to_string(encrypted_name).ok()
+}
+
+/// Create an item in the vault: a SecureNote with optional custom fields,
+/// addressed as `folder/name` (or bare `name` for the vault root).
+///
+/// Every payload is encrypted client-side with a fresh per-item symmetric
+/// key before it leaves this process; the server stores ciphertext only.
+/// Never prints field values.
+///
+/// # Errors
+///
+/// Returns an error if the vault is locked, the folder does not exist, an
+/// item with the same name already exists in the destination folder, a
+/// field is malformed, or the server rejects the request.
+pub async fn create(
+    item: &str,
+    fields: Vec<CreateFieldSpec>,
+    note: Option<String>,
+    opts: &CommandOptions,
+) -> Result<()> {
+    let ctx = load_sync_context(opts.allow_insecure_http).await?;
+    let user_keys = ctx
+        .config
+        .crypto_keys
+        .as_ref()
+        .context("Vault locked — run unlock first")?;
+
+    let (item_name, folder_name) = split_item_path(item)?;
+    if item_name.trim().is_empty() {
+        anyhow::bail!("item name must not be empty");
+    }
+
+    let folder = match folder_name {
+        Some(folder) => Some(
+            resolve_folder_id(&ctx.sync_response.folders, user_keys, folder)
+                .with_context(|| format!("resolving destination folder for '{item}'"))?,
+        ),
+        None => None,
+    };
+    let folder_id = folder.map(|f| f.id.as_str().to_string());
+
+    // Refuse to duplicate an existing item name in the destination folder —
+    // re-running an onboarding script must not silently fork items.
+    for cipher in &ctx.sync_response.ciphers {
+        if cipher.folder_id.as_deref().is_none() != folder_id.is_none() {
+            continue;
+        }
+        if let (Some(a), Some(b)) = (cipher.folder_id.as_deref(), folder_id.as_deref()) {
+            if a != b {
+                continue;
+            }
+        }
+        if let Some(existing) = decrypt_cipher_name(cipher, user_keys) {
+            if existing.eq_ignore_ascii_case(item_name) {
+                anyhow::bail!(
+                    "an item named '{existing}' already exists in that folder; \
+                     refusing to create a duplicate (delete it first, or choose another name)"
+                );
+            }
+        }
+    }
+
+    // Fresh per-item key (64 random bytes), wrapped with the user key —
+    // the same layout the web vault creates.
+    let mut raw_item_key = zeroize::Zeroizing::new(vec![0u8; 64]);
+    getrandom::fill(raw_item_key.as_mut_slice())
+        .context("reading OS randomness for the item key")?;
+    let item_keys = CryptoKeys::from_symmetric_key(&raw_item_key)?;
+    let wrapped_key = user_keys.encrypt(&raw_item_key)?;
+
+    let mut encrypted_fields = Vec::with_capacity(fields.len());
+    for spec in &fields {
+        if spec.name.trim().is_empty() {
+            anyhow::bail!("field name must not be empty");
+        }
+        encrypted_fields.push(crate::models::CreateFieldRequest {
+            r#type: if spec.hidden { 1 } else { 0 },
+            name: item_keys.encrypt_to_string(&spec.name)?,
+            value: item_keys.encrypt_to_string(&spec.value)?,
+        });
+    }
+
+    let request = crate::models::CreateCipherRequest {
+        r#type: CipherType::SecureNote as u8,
+        name: item_keys.encrypt_to_string(item_name)?,
+        notes: match note {
+            Some(ref note) => Some(item_keys.encrypt_to_string(note)?),
+            None => None,
+        },
+        key: Some(wrapped_key),
+        folder_id,
+        fields: encrypted_fields,
+        secure_note: crate::models::CreateSecureNoteData { r#type: 0 },
+    };
+
+    let created = ctx.api.create_cipher(&ctx.access_token, &request).await?;
+
+    let location = match folder_name {
+        Some(folder) => format!("folder '{folder}'"),
+        None => "the vault root".to_string(),
+    };
+    println!("Created item '{item_name}' in {location}");
+    println!("  id: {}", created.id);
+    let hidden: Vec<&str> = fields
+        .iter()
+        .filter(|f| f.hidden)
+        .map(|f| f.name.as_str())
+        .collect();
+    let visible: Vec<&str> = fields
+        .iter()
+        .filter(|f| !f.hidden)
+        .map(|f| f.name.as_str())
+        .collect();
+    if !visible.is_empty() {
+        println!("  fields: {}", visible.join(", "));
+    }
+    if !hidden.is_empty() {
+        println!("  secret fields: {} (values not printed)", hidden.join(", "));
+    }
+    Ok(())
+}
+
+/// Delete an item by `folder/name` (or bare `name` / raw item id).
+/// Requires `--yes`; prints the deleted item's id, never any field values.
+///
+/// # Errors
+///
+/// Returns an error if the vault is locked, the item is not found or is
+/// ambiguous, `--yes` was not passed, or the server rejects the request.
+pub async fn delete_item(item: &str, yes: bool, opts: &CommandOptions) -> Result<()> {
+    let ctx = load_sync_context(opts.allow_insecure_http).await?;
+    let user_keys = ctx
+        .config
+        .crypto_keys
+        .as_ref()
+        .context("Vault locked — run unlock first")?;
+
+    let (item_name, folder_name) = split_item_path(item)?;
+
+    let folder_id: Option<String> = match folder_name {
+        Some(folder) => Some(
+            resolve_folder_id(&ctx.sync_response.folders, user_keys, folder)?
+                .id
+                .as_str()
+                .to_string(),
+        ),
+        None => None,
+    };
+
+    // A raw item id short-circuits name resolution, matching `get`.
+    if let Some(cipher) = ctx
+        .sync_response
+        .ciphers
+        .iter()
+        .find(|c| c.id.as_str() == item)
+    {
+        return finish_delete(&ctx, cipher, item, yes).await;
+    }
+
+    let mut matches: Vec<&Cipher> = Vec::new();
+    for cipher in &ctx.sync_response.ciphers {
+        if cipher.folder_id.as_deref().is_none() != folder_id.is_none() {
+            continue;
+        }
+        if let (Some(a), Some(b)) = (cipher.folder_id.as_deref(), folder_id.as_deref()) {
+            if a != b {
+                continue;
+            }
+        }
+        if let Some(existing) = decrypt_cipher_name(cipher, user_keys) {
+            if existing.eq_ignore_ascii_case(item_name) {
+                matches.push(cipher);
+            }
+        }
+    }
+
+    match matches.as_slice() {
+        [] => anyhow::bail!("item '{item}' not found"),
+        [cipher] => finish_delete(&ctx, cipher, item, yes).await,
+        matches => anyhow::bail!(
+            "item '{item}' matches {} items; pass an item id to disambiguate",
+            matches.len()
+        ),
+    }
+}
+
+async fn finish_delete(ctx: &SyncContext, cipher: &Cipher, item: &str, yes: bool) -> Result<()> {
+    if !yes {
+        anyhow::bail!(
+            "refusing to delete '{item}' (id {}) without --yes",
+            cipher.id
+        );
+    }
+    let id = cipher.id.as_str().to_string();
+    ctx.api.delete_cipher(&ctx.access_token, &id).await?;
+    println!("Deleted item '{item}' ({id})");
     Ok(())
 }
 

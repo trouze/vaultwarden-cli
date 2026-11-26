@@ -328,6 +328,46 @@ impl ApiClient {
         .await
     }
 
+    /// Create a cipher (item) in the user's personal vault.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the request cannot be sent, if the server returns
+    /// a non-success status, or if the response body cannot be parsed as a
+    /// [`crate::models::Cipher`].
+    pub async fn create_cipher(
+        &self,
+        access_token: &str,
+        request: &crate::models::CreateCipherRequest,
+    ) -> Result<crate::models::Cipher> {
+        self.post_json(
+            "/api/ciphers",
+            access_token,
+            request,
+            "cipher create",
+            "Cipher create",
+            "Failed to parse cipher create response",
+        )
+        .await
+    }
+
+    /// Delete a cipher (item) by its ID.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the request cannot be sent or the server returns
+    /// a non-success status.
+    pub async fn delete_cipher(&self, access_token: &str, cipher_id: &str) -> Result<()> {
+        // Percent-encode cipher_id as a single path segment so characters such
+        // as `/`, `?`, or `#` in an id cannot alter the request target (same
+        // rationale as cipher_by_id).
+        let encoded_id =
+            percent_encoding::utf8_percent_encode(cipher_id, CIPHER_ID_PATH_ENCODE_SET);
+        let path = format!("/api/ciphers/{encoded_id}");
+        self.delete_expect_success(&path, access_token, "cipher delete", "Cipher delete")
+            .await
+    }
+
     /// List ciphers filtered by organization, collection, and/or cipher type.
     ///
     /// # Errors
@@ -412,6 +452,61 @@ impl ApiClient {
             .await
             .with_context(|| format!("Failed to read {operation} response"))?;
         serde_json::from_slice::<T>(&bytes).with_context(|| parse_context.to_string())
+    }
+
+    async fn post_json<T: serde::de::DeserializeOwned>(
+        &self,
+        path: &str,
+        access_token: &str,
+        body: &impl serde::Serialize,
+        operation: &str,
+        error_prefix: &str,
+        parse_context: &str,
+    ) -> Result<T> {
+        let url = format!("{}{}", self.base_url, path);
+        let response = self
+            .client
+            .post(&url)
+            .bearer_auth(access_token)
+            .json(body)
+            .send()
+            .await
+            .with_context(|| format!("Failed to send {operation} request"))?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = bounded_error_body_snippet(response).await;
+            anyhow::bail!("{error_prefix} failed ({status}): {body}");
+        }
+
+        let bytes = read_bounded_body(response, API_SUCCESS_BODY_LIMIT_BYTES, "success")
+            .await
+            .with_context(|| format!("Failed to read {operation} response"))?;
+        serde_json::from_slice::<T>(&bytes).with_context(|| parse_context.to_string())
+    }
+
+    async fn delete_expect_success(
+        &self,
+        path: &str,
+        access_token: &str,
+        operation: &str,
+        error_prefix: &str,
+    ) -> Result<()> {
+        let url = format!("{}{}", self.base_url, path);
+        let response = self
+            .client
+            .delete(&url)
+            .bearer_auth(access_token)
+            .send()
+            .await
+            .with_context(|| format!("Failed to send {operation} request"))?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = bounded_error_body_snippet(response).await;
+            anyhow::bail!("{error_prefix} failed ({status}): {body}");
+        }
+        Ok(())
     }
 
     async fn get_json<T: serde::de::DeserializeOwned>(

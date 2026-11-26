@@ -1487,3 +1487,50 @@ mod tests {
         }
     }
 }
+
+/// Request body for `POST /api/ciphers`: create a personal SecureNote with
+/// optional custom fields. Every string payload is a Bitwarden encrypted
+/// string (`2.<iv>|<ct>|<mac>`) produced by `CryptoKeys::encrypt`; the
+/// server stores ciphertext only, never plaintext.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateCipherRequest {
+    /// Cipher type value; 2 = SecureNote.
+    pub r#type: u8,
+    /// Encrypted item name.
+    pub name: String,
+    /// Encrypted notes (stored whole-item plaintext only after decryption).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub notes: Option<String>,
+    /// Encrypted per-item symmetric key (64 random bytes), wrapped with the
+    /// user key. `None` encrypts the item directly with the user key
+    /// (legacy layout); `Some` matches the web vault's default.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
+    /// Destination folder ID (already resolved from the folder name).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub folder_id: Option<String>,
+    /// Custom fields; 0 = text, 1 = hidden.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub fields: Vec<CreateFieldRequest>,
+    /// SecureNote payload; type 0 = generic note.
+    pub secure_note: CreateSecureNoteData,
+}
+
+/// A single custom field on a created cipher.
+#[derive(Debug, Serialize)]
+pub struct CreateFieldRequest {
+    /// Bitwarden field type; 0 = text, 1 = hidden (secret).
+    pub r#type: u8,
+    /// Encrypted field name.
+    pub name: String,
+    /// Encrypted field value.
+    pub value: String,
+}
+
+/// SecureNote data payload.
+#[derive(Debug, Serialize)]
+pub struct CreateSecureNoteData {
+    /// 0 = generic note.
+    pub r#type: u8,
+}

@@ -185,6 +185,34 @@ vaultwarden-cli get-uri github.com -p       # just password
 vaultwarden-cli get-uri github.com -u       # just username
 ```
 
+### Creating and Deleting Items
+
+Agents and scripts can create items without any secret appearing in `argv`
+or terminal output: values are encrypted client-side (fresh per-item key,
+wrapped with the user key — the same layout the web vault creates) and the
+server only ever receives ciphertext.
+
+```bash
+# Create shell/my-tool in folder 'shell' with a text field and a hidden one.
+# --secret reads its value silently from the prompt, or one line from
+# stdin when piped — never from argv.
+printf '%s\n' "$TOKEN" | vaultwarden-cli create shell/my-tool \
+    --field ENDPOINT=https://example.com \
+    --secret API_TOKEN
+
+# Bare names (no folder) create in the vault root. Notes are optional.
+vaultwarden-cli create my-note --note "plain text note"
+
+# Refuses to duplicate an existing item name in the destination folder,
+# so re-running an onboarding script is safe.
+
+# Delete by folder/name or by item id (always explicit):
+vaultwarden-cli delete shell/my-tool --yes
+
+# Output of create/delete prints names, ids, and field NAMES only —
+# never field values.
+```
+
 ### Using in Scripts
 
 ```bash
